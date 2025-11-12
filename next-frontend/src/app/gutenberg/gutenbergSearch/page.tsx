@@ -3,33 +3,126 @@
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 
+type ApiSource = 'gutendex' | 'openlibrary' | 'google';
+type Book = {
+    id: string;
+    title: string;
+    authors: string[];
+    languages: string[];
+    downloads: number;
+    coverUrl?: string;
+    textUrl?: string;
+    source: string;
+};
+
 export default function BookSearchPage() {
     const [query, setQuery] = useState('');
     const [results, setResults] = useState<any[]>([]);
     const [loading, setLoading] = useState(false);
     const [nextUrl, setNextUrl] = useState<string | null>(null);
     const [prevUrl, setPrevUrl] = useState<string | null>(null);
+    const [selectedApis, setSelectedApis] = useState<ApiSource[]>(['gutendex']);
+    const [pagination, setPagination] = useState<{
+        gutendex?: { next: string | null; prev: string | null };
+        openlibrary?: { page: number; totalPages: number };
+        google?: { startIndex: number; totalItems: number };
+    }>({});
     const router = useRouter();
 
-    const fetchBooks = async (url: string) => {
-        setLoading(true);
+    // API切り替え
+    const toggleApi = (api: ApiSource) => {
+        setSelectedApis((prev) =>
+            prev.includes(api) ? prev.filter((a) => a !== api) : [...prev, api]
+        );
+    };
+
+    // API から本を取得
+    const fetchBooksFromApi = async (api: ApiSource, q: string, pageArg?: any) => {
         try {
-            const res = await fetch(url);
-            const data = await res.json();
-            setResults(data.results);
-            setNextUrl(data.next);
-            setPrevUrl(data.previous);
+            if (api === 'gutendex') {
+                const url = typeof pageArg === "string"
+                    ? pageArg
+                    : `https://gutendex.com/books?search=${q}&languages=en`;
+                const res = await fetch(url);
+                const data = await res.json();
+                setPagination((prev) => ({
+                    ...prev,
+                    gutendex: { next: data.next, prev: data.previous }
+                }));
+                return data.results.map((b: any) => ({
+                    id: `gutendex-${b.id}`,
+                    title: b.title,
+                    authors: b.authors.map((a: any) => a.name),
+                    languages: b.languages,
+                    downloads: b.download_count,
+                    coverUrl: b.formats["image/jpeg"],
+                    textUrl: b.formats["text/plain; charset=us-ascii"] || b.formats["text/plain"],
+                    source: "gutendex"
+                }));
+            }
+
+            if (api === 'openlibrary') {
+                const page = typeof pageArg === "number" ? pageArg : 1;
+                const res = await fetch(`https://openlibrary.org/search.json?q=${q}&page=${page}`);
+                const data = await res.json();
+                setPagination((prev) => ({
+                    ...prev,
+                    openlibrary: { page, totalPages: Math.ceil(data.numFound / 100) }
+                }));
+                return data.docs.map((b: any) => ({
+                    id: `openlib-${b.key}`,
+                    title: b.title,
+                    authors: b.author_name || [],
+                    languages: b.language || [],
+                    downloads: 0,
+                    coverUrl: b.cover_i
+                        ? `https://covers.openlibrary.org/b/id/${b.cover_i}-M.jpg`
+                        : null,
+                    textUrl: null, // OpenLibrary は直接テキスト提供しない
+                    source: "openlibrary"
+                }));
+            }
+
+            if (api === 'google') {
+                const startIndex = typeof pageArg === "number" ? pageArg : 0;
+                const maxResults = 10;
+                const res = await fetch(
+                    `https://www.googleapis.com/books/v1/volumes?q=${q}&startIndex=${startIndex}&maxResults=${maxResults}`
+                );
+                const data = await res.json();
+                setPagination((prev) => ({
+                    ...prev,
+                    google: { startIndex, totalItems: data.totalItems }
+                }));
+                return (data.items || []).map((b: any) => ({
+                    id: `google-${b.id}`,
+                    title: b.volumeInfo.title,
+                    authors: b.volumeInfo.authors || [],
+                    languages: b.volumeInfo.language ? [b.volumeInfo.language] : [],
+                    downloads: 0,
+                    coverUrl: b.volumeInfo.imageLinks?.thumbnail,
+                    textUrl: b.volumeInfo.previewLink,
+                    source: "google"
+                }));
+            }
         } catch (err) {
-            console.error('Fetch error:', err);
-        } finally {
-            setLoading(false);
+            console.error(`${api} fetch error:`, err);
+            return [];
         }
     };
 
-    const handleSearch = () => {
-        if (!query) return;
-        const searchUrl = `https://gutendex.com/books/?search=${encodeURIComponent(query)}&languages=en`;
-        fetchBooks(searchUrl);
+    const handleSearch = async () => {
+        if (!query || selectedApis.length === 0) return;
+        setLoading(true);
+        try {
+            const allResults = await Promise.all(
+                selectedApis.map(api => fetchBooksFromApi(api, query))
+            );
+            // すべて結合
+            setResults(allResults.flat());
+        } finally {
+            setLoading(false);
+        }
     };
 
     const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -39,15 +132,15 @@ export default function BookSearchPage() {
     };
 
     const handleSelectBook = (book: any) => {
-        const plainTextUrl = book.formats["text/plain; charset=us-ascii"] || book.formats["text/plain"];
-        if (!plainTextUrl) return alert("この書籍にはテキストがありません。");
+        if (!book.textUrl) return alert("この書籍にはテキストがありません。");
         router.push(
             `/gutenberg/gutenbergView?` +
             `title=${encodeURIComponent(book.title)}` +
-            `&url=${encodeURIComponent(plainTextUrl)}` +
-            `&authors=${encodeURIComponent(book.authors.map((a: any) => a.name).join(', '))}` +
-            `&downloads=${book.download_count}` +
-            `&lang=${encodeURIComponent(book.languages.join(', '))}`
+            `&url=${encodeURIComponent(book.textUrl)}` +
+            `&authors=${encodeURIComponent(book.authors.join(', '))}` +
+            `&downloads=${book.downloads || 0}` +
+            `&lang=${encodeURIComponent(book.languages.join(', '))}` +
+            `&source=${encodeURIComponent(book.source)}`
         );
     };
 
@@ -79,6 +172,30 @@ export default function BookSearchPage() {
                     </p>
                 </div>
 
+                {/* API 選択チェックボックス */}
+                <div className="flex gap-4 mb-4">
+                    <label>
+                        <input
+                            type="checkbox"
+                            checked={selectedApis.includes('gutendex')}
+                            onChange={() => toggleApi('gutendex')}
+                        /> Gutendex
+                    </label>
+                    <label>
+                        <input
+                            type="checkbox"
+                            checked={selectedApis.includes('openlibrary')}
+                            onChange={() => toggleApi('openlibrary')}
+                        /> Open Library
+                    </label>
+                    <label>
+                        <input
+                            type="checkbox"
+                            checked={selectedApis.includes('google')}
+                            onChange={() => toggleApi('google')}
+                        /> Google Books
+                    </label>
+                </div>
                 {/* 検索フォーム */}
                 <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg p-6 mb-8">
                     <div className="relative">
@@ -121,13 +238,13 @@ export default function BookSearchPage() {
                                     >
                                         <div className="flex gap-4">
                                             <div className="relative min-w-16 h-24 bg-gray-100 dark:bg-gray-700 rounded overflow-hidden">
-                                                {book.formats["image/jpeg"] && (
+                                                {book.coverUrl && (
                                                     <div
                                                         className="w-full h-full bg-center bg-cover"
-                                                        style={{ backgroundImage: `url(${getBookCoverUrl(book)})` }}
+                                                        style={{ backgroundImage: `url(${book.coverUrl})` }}
                                                     />
                                                 )}
-                                                {!book.formats["image/jpeg"] && (
+                                                {!book.coverUrl && (
                                                     <div className="w-full h-full flex items-center justify-center text-gray-400 dark:text-gray-500">
                                                         <span className="ri-book-2-line text-3xl"></span>
                                                     </div>
@@ -148,7 +265,7 @@ export default function BookSearchPage() {
                                                     </div>
                                                     <div className="flex items-center">
                                                         <span className="ri-download-line mr-1"></span>
-                                                        <span>{book.download_count.toLocaleString()}</span>
+                                                        <span>{book.download_count ? book.download_count.toLocaleString() : 'N/A'}</span>
                                                     </div>
                                                 </div>
                                             </div>
@@ -163,31 +280,68 @@ export default function BookSearchPage() {
 
                             {/* ページネーション */}
                             <div className="flex justify-between items-center p-4 border-t border-gray-100 dark:border-gray-700">
-                                <button
-                                    disabled={!prevUrl}
-                                    onClick={() => prevUrl && fetchBooks(prevUrl)}
-                                    className={`flex items-center px-4 py-2 rounded-lg transition ${prevUrl
-                                            ? 'text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700'
-                                            : 'text-gray-400 dark:text-gray-600 cursor-not-allowed'
-                                        }`}
-                                >
-                                    <span className="ri-arrow-left-line mr-1"></span>
-                                    前へ
-                                </button>
+                                {/* Gutendex */}
+                                {selectedApis.includes('gutendex') && pagination.gutendex && (
+                                    <>
+                                        <button
+                                            disabled={!pagination.gutendex.prev}
+                                            onClick={() => fetchBooksFromApi('gutendex', query, pagination.gutendex?.prev)}
+                                        >
+                                            前へ
+                                        </button>
+                                        <button
+                                            disabled={!pagination.gutendex.next}
+                                            onClick={() => fetchBooksFromApi('gutendex', query, pagination.gutendex?.next)}
+                                        >
+                                            次へ
+                                        </button>
+                                    </>
+                                )}
 
-                                <button
-                                    disabled={!nextUrl}
-                                    onClick={() => nextUrl && fetchBooks(nextUrl)}
-                                    className={`flex items-center px-4 py-2 rounded-lg transition ${nextUrl
-                                            ? 'bg-indigo-600 text-white hover:bg-indigo-700'
-                                            : 'bg-indigo-300 dark:bg-indigo-800/50 text-white cursor-not-allowed'
-                                        }`}
-                                >
-                                    次へ
-                                    <span className="ri-arrow-right-line ml-1"></span>
-                                </button>
-                            </div>
-                        </div>
+                                {/* OpenLibrary */}
+                                {selectedApis.includes('openlibrary') && pagination.openlibrary && (
+                                    <>
+                                        <button
+                                            disabled={pagination.openlibrary.page <= 1}
+                                            onClick={() =>
+                                                fetchBooksFromApi('openlibrary', query, pagination.openlibrary!.page - 1)
+                                            }
+                                        >
+                                            前へ
+                                        </button>
+                                        <button
+                                            disabled={pagination.openlibrary.page >= pagination.openlibrary.totalPages}
+                                            onClick={() =>
+                                                fetchBooksFromApi('openlibrary', query, pagination.openlibrary!.page + 1)
+                                            }
+                                        >
+                                            次へ
+                                        </button>
+                                    </>
+                                )}
+
+                                {/* Google */}
+                                {selectedApis.includes('google') && pagination.google && (
+                                    <>
+                                        <button
+                                            disabled={pagination.google.startIndex <= 0}
+                                            onClick={() =>
+                                                fetchBooksFromApi('google', query, pagination.google!.startIndex - 10)
+                                            }
+                                        >
+                                            前へ
+                                        </button>
+                                        <button
+                                            disabled={pagination.google.startIndex + 10 >= pagination.google.totalItems}
+                                            onClick={() =>
+                                                fetchBooksFromApi('google', query, pagination.google!.startIndex + 10)
+                                            }
+                                        >
+                                            次へ
+                                        </button>
+                                    </>
+                                )}
+                            </div>                        </div>
                     ) : query ? (
                         <div className="p-12 text-center">
                             <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-gray-100 dark:bg-gray-700 mb-4">
