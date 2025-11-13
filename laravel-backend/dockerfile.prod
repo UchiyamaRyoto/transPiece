@@ -1,0 +1,23 @@
+# さっきビルドした Sail ランタイムをベースにする
+FROM transpiece-runtime-8.4
+
+WORKDIR /var/www/html
+
+# アプリコードをコンテナにコピー
+COPY . .
+
+# 権限調整（storage / cache 周り）
+RUN chown -R sail:sail storage bootstrap/cache
+
+# 本番向け composer インストール & キャッシュ
+RUN composer install --no-dev --optimize-autoloader \
+    && php artisan config:cache \
+    && php artisan route:cache || true \
+    && php artisan view:cache || true
+
+# 公開ポート
+EXPOSE 80
+
+# ENTRYPOINT はベースイメージの ["start-container"] をそのまま使う
+# CMD もここでは書かない（空のままにするのがポイント）
+
