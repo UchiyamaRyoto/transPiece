@@ -16,6 +16,7 @@ export default function LoginPage() {
         setIsLoading(true);
         setMessage('');
         try {
+            await api.get('/sanctum/csrf-cookie');
             await api.post('/api/login', { email, password });
             router.push('/home');
         } catch {
